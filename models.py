@@ -32,17 +32,41 @@ class GraphConvolution(nn.Module):
         else:
             return output
     
+class AttentionLayer(nn.Module):
+    def __init__(self, feature_dim):
+        super(AttentionLayer, self).__init__()
+        self.feature_dim = feature_dim
+
+        # Attention weights
+        self.attention_weights = nn.Parameter(torch.Tensor(feature_dim, 1))
+        nn.init.xavier_normal_(self.attention_weights)
+
+    def forward(self, x):
+        # Compute attention scores
+        attention_scores = torch.matmul(x, self.attention_weights)
+
+        # Apply softmax to get attention distribution
+        attention_distribution = F.softmax(attention_scores, dim=1)
+
+        # Apply attention to the input features
+        attended_features = x * attention_distribution.expand_as(x)
+        return attended_features
 
 class GCN_E(nn.Module):
     def __init__(self, in_dim, hgcn_dim, dropout):
         super().__init__()
+        self.attention_layer = AttentionLayer(in_dim)
         self.gc1 = GraphConvolution(in_dim, hgcn_dim[0])
         self.gc2 = GraphConvolution(hgcn_dim[0], hgcn_dim[1])
         self.gc3 = GraphConvolution(hgcn_dim[1], hgcn_dim[2])
         self.dropout = dropout
 
     def forward(self, x, adj):
-        x = self.gc1(x, adj)
+        # Apply attention
+        x = self.attention_layer(x)
+
+        # Continue with GCN layers
+        x = self.gc1(x , adj)
         x = F.leaky_relu(x, 0.25)
         x = F.dropout(x, self.dropout, training=self.training)
         x = self.gc2(x, adj)
@@ -52,6 +76,7 @@ class GCN_E(nn.Module):
         x = F.leaky_relu(x, 0.25)
         
         return x
+
 
 
 class Classifier_1(nn.Module):

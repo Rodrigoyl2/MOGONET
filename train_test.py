@@ -6,43 +6,62 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 import torch
 import torch.nn.functional as F
 from models import init_model_dict, init_optim
-from utils import one_hot_tensor, cal_sample_weight, gen_adj_mat_tensor, gen_test_adj_mat_tensor, cal_adj_mat_parameter
-
+from utils import one_hot_tensor, cal_sample_weight, gen_adj_mat_tensor, gen_test_adj_mat_tensor, cal_adj_mat_parameter, custom_accuracy_score, custom_weighted_f1_score, custom_macro_f1_score, add_gaussian_noise, calculate_train_accuracy, calculate_test_loss
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, f1_score
+import torch.nn as nn
 cuda = True if torch.cuda.is_available() else False
 
-
-def prepare_trte_data(data_folder, view_list):
+def prepare_trte_data(data_folder, view_list, noise_std_dev=0.01, num_data_points = None):
     num_view = len(view_list)
     labels_tr = np.loadtxt(os.path.join(data_folder, "labels_tr.csv"), delimiter=',')
     labels_te = np.loadtxt(os.path.join(data_folder, "labels_te.csv"), delimiter=',')
     labels_tr = labels_tr.astype(int)
     labels_te = labels_te.astype(int)
+
+    # Adjust for n data points if provided
+    if num_data_points is not None:
+        labels_tr = labels_tr[:num_data_points]
+        labels_te = labels_te[:num_data_points]
+
     data_tr_list = []
     data_te_list = []
     for i in view_list:
-        data_tr_list.append(np.loadtxt(os.path.join(data_folder, str(i)+"_tr.csv"), delimiter=','))
-        data_te_list.append(np.loadtxt(os.path.join(data_folder, str(i)+"_te.csv"), delimiter=','))
+        data_tr = np.loadtxt(os.path.join(data_folder, str(i) + "_tr.csv"), delimiter=',')
+        data_te = np.loadtxt(os.path.join(data_folder, str(i) + "_te.csv"), delimiter=',')
+
+        # Adjust for n data points if provided
+        if num_data_points is not None:
+            data_tr = data_tr[:num_data_points, :]
+            data_te = data_te[:num_data_points, :]
+
+        # Add Gaussian noise to training data
+        data_tr_noisy = add_gaussian_noise(data_tr, std_dev=noise_std_dev)
+
+        data_tr_list.append(data_tr_noisy)
+        data_te_list.append(data_te)
+
     num_tr = data_tr_list[0].shape[0]
     num_te = data_te_list[0].shape[0]
     data_mat_list = []
     for i in range(num_view):
         data_mat_list.append(np.concatenate((data_tr_list[i], data_te_list[i]), axis=0))
+    
     data_tensor_list = []
     for i in range(len(data_mat_list)):
         data_tensor_list.append(torch.FloatTensor(data_mat_list[i]))
         if cuda:
             data_tensor_list[i] = data_tensor_list[i].cuda()
-    idx_dict = {}
-    idx_dict["tr"] = list(range(num_tr))
-    idx_dict["te"] = list(range(num_tr, (num_tr+num_te)))
+
+    idx_dict = {"tr": list(range(num_tr)), "te": list(range(num_tr, (num_tr + num_te)))}
     data_train_list = []
     data_all_list = []
     for i in range(len(data_tensor_list)):
         data_train_list.append(data_tensor_list[i][idx_dict["tr"]].clone())
-        data_all_list.append(torch.cat((data_tensor_list[i][idx_dict["tr"]].clone(),
-                                       data_tensor_list[i][idx_dict["te"]].clone()),0))
+        data_all_list.append(torch.cat((data_tensor_list[i][idx_dict["tr"]].clone(), data_tensor_list[i][idx_dict["te"]].clone()), 0))
+
     labels = np.concatenate((labels_tr, labels_te))
-    
+
     return data_train_list, data_all_list, idx_dict, labels
 
 
@@ -106,7 +125,13 @@ def test_epoch(data_list, adj_list, te_idx, model_dict):
 
 def train_test(data_folder, view_list, num_class,
                lr_e_pretrain, lr_e, lr_c, 
-               num_epoch_pretrain, num_epoch):
+               num_epoch_pretrain, num_epoch, num_data_points = None):
+    train_acc_values, train_loss_values = [], []
+    test_acc_values, test_loss_values = [], []
+    train_acc_values = []
+    test_acc_values = []
+    test_f1_values = []
+    test_auc_values = []
     test_inverval = 50
     num_view = len(view_list)
     dim_hvcdn = pow(num_class,num_view)
@@ -116,7 +141,7 @@ def train_test(data_folder, view_list, num_class,
     if data_folder == 'BRCA':
         adj_parameter = 10
         dim_he_list = [400,400,200]
-    data_tr_list, data_trte_list, trte_idx, labels_trte = prepare_trte_data(data_folder, view_list)
+    data_tr_list, data_trte_list, trte_idx, labels_trte = prepare_trte_data(data_folder, view_list, num_data_points)
     labels_tr_tensor = torch.LongTensor(labels_trte[trte_idx["tr"]])
     onehot_labels_tr_tensor = one_hot_tensor(labels_tr_tensor, num_class)
     sample_weight_tr = cal_sample_weight(labels_trte[trte_idx["tr"]], num_class)
@@ -139,18 +164,103 @@ def train_test(data_folder, view_list, num_class,
                     onehot_labels_tr_tensor, sample_weight_tr, model_dict, optim_dict, train_VCDN=False)
     print("\nTraining...")
     optim_dict = init_optim(num_view, model_dict, lr_e, lr_c)
-    for epoch in range(num_epoch+1):
-        train_epoch(data_tr_list, adj_tr_list, labels_tr_tensor, 
-                    onehot_labels_tr_tensor, sample_weight_tr, model_dict, optim_dict)
+    # Training loop
+    for epoch in range(num_epoch + 1):
+        # Train and get loss
+        train_loss = train_epoch(data_tr_list, adj_tr_list, labels_tr_tensor, 
+                                 onehot_labels_tr_tensor, sample_weight_tr, model_dict, optim_dict)
+        train_loss_values.append(train_loss)
+
+        # Calculate training accuracy
+        # You need to implement a function to calculate train accuracy
+        train_accuracy = calculate_train_accuracy(data_tr_list, adj_tr_list, labels_tr_tensor, model_dict)
+        train_acc_values.append(train_accuracy)
+
+        # Test every 'test_interval' epochs
         if epoch % test_inverval == 0:
             te_prob = test_epoch(data_trte_list, adj_te_list, trte_idx["te"], model_dict)
-            print("\nTest: Epoch {:d}".format(epoch))
-            if num_class == 2:
-                print("Test ACC: {:.3f}".format(accuracy_score(labels_trte[trte_idx["te"]], te_prob.argmax(1))))
-                print("Test F1: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1))))
-                print("Test AUC: {:.3f}".format(roc_auc_score(labels_trte[trte_idx["te"]], te_prob[:,1])))
-            else:
-                print("Test ACC: {:.3f}".format(accuracy_score(labels_trte[trte_idx["te"]], te_prob.argmax(1))))
-                print("Test F1 weighted: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1), average='weighted')))
-                print("Test F1 macro: {:.3f}".format(f1_score(labels_trte[trte_idx["te"]], te_prob.argmax(1), average='macro')))
-            print()
+
+            # Calculate test accuracy and loss
+            test_accuracy = accuracy_score(labels_trte[trte_idx["te"]], te_prob.argmax(1))
+            test_acc_values.append(test_accuracy)
+            criterion = nn.CrossEntropyLoss()
+            te_idx = torch.LongTensor(trte_idx["te"])  
+            test_loss = calculate_test_loss(data_trte_list, adj_te_list, labels_trte, model_dict, criterion, te_idx)
+            test_loss_values.append(test_loss)
+    
+    # print("type:", type(train_loss_values))
+    # print("type:", type(test_loss_values))
+    # print("train_acc_values:", train_acc_values)
+    # print("test_acc_values:", test_acc_values)
+    # Before plotting, check and print the types and first few elements
+    print("train_loss_values type:", type(train_loss_values))
+    print("train_loss_values sample:", train_loss_values[:5])
+    print("test_loss_values type:", type(test_loss_values))
+    print("test_loss_values sample:", test_loss_values[:5])
+
+
+    # Plotting
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(train_acc_values, label='Training Accuracy')
+    plt.title('Accuracy over epochs')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    # # Plotting
+    # plt.figure(figsize=(12, 5))
+    # train_loss_C = [d['C'] for d in train_loss_values]
+    # # Plot for aggregate loss C
+    # plt.subplot(1, 2, 1)
+    # plt.plot(train_loss_C, label='Training Loss C')
+    # plt.title('Aggregate Loss C over epochs')
+    # plt.xlabel('Epochs')
+    # plt.ylabel('Loss')
+    # plt.legend()
+
+    # # Extracting individual components
+    # train_loss_C1 = [d['C1'] for d in train_loss_values]
+    # train_loss_C2 = [d['C2'] for d in train_loss_values]
+    # train_loss_C3 = [d['C3'] for d in train_loss_values]
+    # train_loss_C = [d['C'] for d in train_loss_values]
+
+    # # Plotting
+    # plt.figure(figsize=(12, 10))
+
+    # # Plot for C1
+    # plt.subplot(2, 2, 1)
+    # plt.plot(train_loss_C1, label='Training Loss C1')
+    # plt.title('Loss C1 over epochs')
+    # plt.xlabel('Epochs')
+    # plt.ylabel('Loss')
+    # plt.legend()
+
+    # # Plot for C2
+    # plt.subplot(2, 2, 2)
+    # plt.plot(train_loss_C2, label='Training Loss C2')
+    # plt.title('Loss C2 over epochs')
+    # plt.xlabel('Epochs')
+    # plt.ylabel('Loss')
+    # plt.legend()
+
+    # # Plot for C3
+    # plt.subplot(2, 2, 3)
+    # plt.plot(train_loss_C3, label='Training Loss C3')
+    # plt.title('Loss C3 over epochs')
+    # plt.xlabel('Epochs')
+    # plt.ylabel('Loss')
+    # plt.legend()
+
+    # # Plot for aggregate loss C
+    # plt.subplot(2, 2, 4)
+    # plt.plot(train_loss_C, label='Training Loss C')
+    # plt.title('Aggregate Loss C over epochs')
+    # plt.xlabel('Epochs')
+    # plt.ylabel('Loss')
+    # plt.legend()
+
+    # plt.show()
+    accuracy = test_acc_values[-1] if test_acc_values else None
+    # Return the final testing accuracy
+    return model_dict, accuracy
